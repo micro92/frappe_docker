@@ -15,4 +15,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build the Docker image
-      run: docker build . --tag micro365/micro365:erpnext-plus
+      run: ./build.sh
+      
+      
+      #docker build . --tag micro365/micro365:erpnext-plus
