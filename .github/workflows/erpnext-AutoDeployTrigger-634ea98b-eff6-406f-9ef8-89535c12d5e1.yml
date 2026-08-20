@@ -3,13 +3,7 @@ name: Trigger auto deployment for erpnext
 # When this action will be executed
 on:
   # Automatically trigger it when detected changes in repo
-  push:
-    branches: 
-      [ main ]
-    paths:
-    - '**'
-    - '.github/workflows/erpnext-AutoDeployTrigger-634ea98b-eff6-406f-9ef8-89535c12d5e1.yml'
-
+  
   # Allow manual trigger 
   workflow_dispatch:      
 
