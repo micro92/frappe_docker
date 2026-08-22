@@ -30,7 +30,7 @@ jobs:
         
     - name: Build the Docker image
       run:  #!/bin/bash
-        sudo docker buildx build  --no-cache  --build-arg=FRAPPE_PATH=https://github.com/frappe/frappe  --build-arg=FRAPPE_BRANCH=version-16  --secret=id=apps_json,src=apps.json   --tag micro365/micro365:erpnext-plus --platform=linux/amd64,linux/arm64 --file=images/layered/Containerfile .
+        sudo docker build  --no-cache  --build-arg=FRAPPE_PATH=https://github.com/frappe/frappe  --build-arg=FRAPPE_BRANCH=version-16  --secret=id=apps_json,src=apps.json   --tag micro365/micro365:erpnext-plus --platform=linux/amd64 --file=images/layered/Containerfile .
     - name: Push the Docker image
       run:  docker push micro365/micro365:erpnext-plus
 
