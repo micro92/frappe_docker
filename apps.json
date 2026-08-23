@@ -34,6 +34,10 @@
 "url": "https://github.com/frappe/gameplan",
 "branch": "develop"
 }
+,{
+"url": "https://github.com/frappe/lending",
+"branch": "develop"
+}
 ,
 {
 "url": "https://github.com/frappe/crm",
