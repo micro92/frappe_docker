@@ -6,11 +6,11 @@
   },
   {
     "url": "https://github.com/frappe/hrms",
-    "branch": "develop"
+    "branch": "version-16"
   }
 , {
     "url": "https://github.com/frappe/payments",
-    "branch": "develop"
+    "branch": "version-16"
   }
 , {
     "url": "https://github.com/frappe/telephony",
@@ -19,7 +19,7 @@
 ,
   {
     "url": "https://github.com/frappe/helpdesk",
-    "branch": "develop"
+    "branch": "version-16"
   } ,
   {
     "url": "https://github.com/frappe/insights",
