@@ -49,23 +49,34 @@ def env_file(tmp_path_factory: pytest.TempPathFactory):
     for var in ("FRAPPE_VERSION", "ERPNEXT_VERSION"):
         _add_version_var(name=var, env_path=file_path)
 
+    # The integration stack has one controlled network and no published backend.
+    with open(file_path, "a") as f:
+        f.write(
+            "\nFORWARDED_ALLOW_IPS=*\n"
+            "HTTP_PUBLISH_PORT=127.0.0.1:80\n"
+            "HTTPS_PUBLISH_PORT=127.0.0.1:443\n"
+        )
+
     yield str(file_path)
     os.remove(file_path)
 
 
 @pytest.fixture(scope="session")
 def compose(env_file: str):
-    return Compose(project_name="test", env_file=env_file)
+    return Compose(
+        project_name=os.getenv("FRAPPE_DOCKER_TEST_PROJECT", "test"), env_file=env_file
+    )
 
 
 @pytest.fixture(autouse=True, scope="session")
 def frappe_setup(compose: Compose):
     compose.stop()
-
-    compose("up", "-d", "--quiet-pull")
-    yield
-
-    compose.stop()
+    try:
+        compose("up", "-d", "--quiet-pull")
+        yield
+    finally:
+        # The HTTPS test adds a certificate volume beyond the base stack.
+        compose("-f", "overrides/compose.https.yaml", "down", "-v", "--remove-orphans")
 
 
 @pytest.fixture(scope="session")
@@ -126,43 +137,65 @@ def python_path():
 
 @dataclass
 class S3ServiceResult:
+    endpoint_url: str
+    bucket: str
     access_key: str
     secret_key: str
 
 
 @pytest.fixture
 def s3_service(python_path: str, compose: Compose):
+    endpoint_url = "http://s3:8333"
+    bucket = "frappe"
     access_key = "AKIAIOSFODNN7EXAMPLE"
     secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-    cmd = (
-        "docker",
-        "run",
-        "--name",
-        "minio",
-        "-d",
-        "-e",
-        f"MINIO_ACCESS_KEY={access_key}",
-        "-e",
-        f"MINIO_SECRET_KEY={secret_key}",
-        "--network",
-        f"{compose.project_name}_default",
-        "minio/minio",
-        "server",
-        "/data",
-    )
-    subprocess.check_call(cmd)
+    container_name = f"{compose.project_name}-s3"
+    try:
+        subprocess.check_call(
+            (
+                "docker",
+                "run",
+                "--detach",
+                "--pull=always",
+                "--name",
+                container_name,
+                "--network",
+                f"{compose.project_name}_default",
+                "--network-alias",
+                "s3",
+                "-e",
+                f"AWS_ACCESS_KEY_ID={access_key}",
+                "-e",
+                f"AWS_SECRET_ACCESS_KEY={secret_key}",
+                "-e",
+                f"S3_BUCKET={bucket}",
+                "chrislusf/seaweedfs:latest",
+                "mini",
+                "-dir=/data",
+            )
+        )
+        compose("cp", "tests/_wait_for_s3.py", "backend:/tmp")
+        compose.exec("backend", "bench", "pip", "install", "boto3~=1.34.143")
+        compose.exec(
+            "-e",
+            f"S3_ENDPOINT_URL={endpoint_url}",
+            "-e",
+            f"S3_BUCKET={bucket}",
+            "-e",
+            f"AWS_ACCESS_KEY_ID={access_key}",
+            "-e",
+            f"AWS_SECRET_ACCESS_KEY={secret_key}",
+            "backend",
+            python_path,
+            "/tmp/_wait_for_s3.py",
+        )
 
-    compose("cp", "tests/_create_bucket.py", "backend:/tmp")
-    compose.exec("backend", "bench", "pip", "install", "boto3~=1.34.143")
-    compose.exec(
-        "-e",
-        f"S3_ACCESS_KEY={access_key}",
-        "-e",
-        f"S3_SECRET_KEY={secret_key}",
-        "backend",
-        python_path,
-        "/tmp/_create_bucket.py",
-    )
-
-    yield S3ServiceResult(access_key=access_key, secret_key=secret_key)
-    subprocess.call(("docker", "rm", "minio", "-f"))
+        yield S3ServiceResult(
+            endpoint_url=endpoint_url,
+            bucket=bucket,
+            access_key=access_key,
+            secret_key=secret_key,
+        )
+    finally:
+        subprocess.call(("docker", "logs", "--tail", "100", container_name))
+        subprocess.call(("docker", "rm", "-fv", container_name))

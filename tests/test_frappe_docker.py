@@ -1,11 +1,18 @@
+import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tests.conftest import S3ServiceResult
-from tests.utils import Compose, check_url_content, wait_for_url
+from tests.utils import (
+    Compose,
+    assert_oauth_return_url,
+    check_url_content,
+    wait_for_url,
+)
 
 BACKEND_SERVICES = (
     "backend",
@@ -13,6 +20,18 @@ BACKEND_SERVICES = (
     "queue-long",
     "scheduler",
 )
+
+
+def test_wkhtmltopdf_installation(compose: Compose, python_path: str):
+    expected = os.getenv("INSTALL_WKHTMLTOPDF", "true") != "false"
+    compose.exec(
+        "backend",
+        python_path,
+        "-c",
+        f"import shutil; assert bool(shutil.which('wkhtmltopdf')) == {expected}",
+    )
+    if expected:
+        compose.exec("backend", "wkhtmltopdf", "--version")
 
 
 @pytest.mark.parametrize("service", BACKEND_SERVICES)
@@ -59,7 +78,7 @@ def test_assets_endpoint(frappe_site: str):
 
 def test_files_reachable(frappe_site: str, tmp_path: Path, compose: Compose):
     content = "lalala\n"
-    file_path = tmp_path / "testfile.txt"
+    file_path = tmp_path / "testfile.svg.txt"
 
     with file_path.open("w") as f:
         f.write(content)
@@ -70,24 +89,20 @@ def test_files_reachable(frappe_site: str, tmp_path: Path, compose: Compose):
         f"backend:/home/frappe/frappe-bench/sites/{frappe_site}/public/files/",
     )
 
-    def callback(text: str):
-        if text == content:
-            return text
-
-    check_url_content(
+    with wait_for_url(
         url=f"http://127.0.0.1/files/{file_path.name}",
-        callback=callback,
         site_name=frappe_site,
-    )
+    ) as response:
+        assert response.read().decode() == content
+        assert "Content-Disposition" not in response.headers
 
 
-def test_files_html_security_headers(
-    frappe_site: str, tmp_path: Path, compose: Compose
+@pytest.mark.parametrize("extension", ("html", "HTML", "SvG", "SVGZ", "XHTML", "SHTML"))
+def test_public_attachment_security_headers(
+    extension: str, frappe_site: str, tmp_path: Path, compose: Compose
 ):
-    file_path = tmp_path / "testfile.html"
-    file_path.write_text(
-        "<html><body>This is a Frappe Docker test html file</body></html>"
-    )
+    file_path = tmp_path / f"testfile.{extension}"
+    file_path.write_text("Frappe Docker public attachment test fixture\n")
 
     compose(
         "cp",
@@ -129,7 +144,7 @@ def test_push_backup(
     restic_password = "secret"
     compose.bench("--site", frappe_site, "backup", "--with-files")
     restic_args = [
-        "--env=RESTIC_REPOSITORY=s3:http://minio:9000/frappe",
+        f"--env=RESTIC_REPOSITORY=s3:{s3_service.endpoint_url}/{s3_service.bucket}",
         f"--env=AWS_ACCESS_KEY_ID={s3_service.access_key}",
         f"--env=AWS_SECRET_ACCESS_KEY={s3_service.secret_key}",
         f"--env=RESTIC_PASSWORD={restic_password}",
@@ -137,11 +152,156 @@ def test_push_backup(
     compose.exec(*restic_args, "backend", "restic", "init")
     compose.exec(*restic_args, "backend", "restic", "backup", "sites")
     compose.exec(*restic_args, "backend", "restic", "snapshots")
+    compose.exec(*restic_args, "backend", "restic", "check", "--read-data")
+
+
+@pytest.fixture
+def proxy_frontend(compose: Compose, frappe_site: str, tmp_path: Path, request):
+    mode, allowed_ips = request.param
+    config = {
+        "services": {
+            "frontend": {
+                "environment": {"TRUST_UPSTREAM_FORWARDED_PROTO": mode},
+                "ports": [{"target": 8080, "host_ip": "127.0.0.1"}],
+            },
+        }
+    }
+    override = tmp_path / "proxy-headers.json"
+    override.write_text(json.dumps(config))
+    try:
+        compose(
+            "-f",
+            str(override),
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "frontend",
+        )
+        if allowed_ips == "frontend":
+            allowed_ips = compose.output(
+                "exec", "-T", "frontend", "getent", "ahostsv4", "frontend"
+            ).split()[0]
+        config["services"]["backend"] = {
+            "environment": {"FORWARDED_ALLOW_IPS": allowed_ips}
+        }
+        override.write_text(json.dumps(config))
+        compose("-f", str(override), "up", "-d", "--no-deps", "backend")
+        # Refresh Nginx's upstream DNS after backend recreation without changing
+        # the frontend address that the explicit allowlist just selected.
+        compose("restart", "frontend")
+        address = compose.output(
+            "-f", str(override), "port", "frontend", "8080"
+        ).strip()
+        url = f"http://{address}"
+        wait_for_url(f"{url}/api/method/ping", frappe_site).close()
+        yield url
+    finally:
+        compose("up", "-d", "--no-deps", "--force-recreate", "backend", "frontend")
+
+
+@pytest.mark.parametrize(
+    ("proxy_frontend", "https_scheme"),
+    [
+        (("off", "*"), "http"),
+        (("on", "*"), "https"),
+        (("on", "127.0.0.1,::1"), "http"),
+        (("on", "frontend"), "https"),
+    ],
+    indirect=["proxy_frontend"],
+    ids=["direct", "wildcard", "loopback-only", "explicit-frontend-ip"],
+)
+def test_proxy_headers(proxy_frontend: str, https_scheme: str, frappe_site: str):
+    for headers, scheme in (
+        ({"X-Forwarded-Proto": "https"}, https_scheme),
+        ({"X-Forwarded-Proto": "http"}, "http"),
+        ({"X-Forwarded-Proto": "unknown"}, "http"),
+        ({}, "http"),
+        (
+            {
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-SSL": "off",
+                "X-Forwarded-Protocol": "http",
+            },
+            https_scheme,
+        ),
+    ):
+        assert_oauth_return_url(proxy_frontend, frappe_site, scheme, headers)
+
+
+def test_invalid_proxy_mode(compose: Compose):
+    with pytest.raises(subprocess.CalledProcessError) as invalid:
+        compose.output(
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "--entrypoint",
+            "nginx-entrypoint.sh",
+            "-e",
+            "TRUST_UPSTREAM_FORWARDED_PROTO=invalid",
+            "frontend",
+        )
+    assert "must be on or off" in invalid.value.stderr
+
+
+def test_compose_output_keeps_json_clean(compose: Compose, tmp_path: Path):
+    override = tmp_path / "obsolete-version.json"
+    # Recent Compose versions warn about this field on stderr.
+    override.write_text(json.dumps({"version": "3.8"}))
+    services = json.loads(
+        compose.output("-f", str(override), "config", "--format", "json")
+    )["services"]
+    assert "backend" in services
+
+
+@pytest.mark.parametrize("host_caddy", [False, True], ids=["direct", "host-caddy"])
+def test_proxy_configuration(tmp_path: Path, host_caddy: bool, monkeypatch):
+    for name in (
+        "HTTP_PUBLISH_PORT",
+        "TRUST_UPSTREAM_FORWARDED_PROTO",
+        "FORWARDED_ALLOW_IPS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / ".env"
+    settings = Path("example.env").read_text()
+    if host_caddy:
+        settings += "\nTRUST_UPSTREAM_FORWARDED_PROTO=on\nFORWARDED_ALLOW_IPS=*\nHTTP_PUBLISH_PORT=127.0.0.1:8080\n"
+    env_file.write_text(settings)
+    compose = Compose(
+        project_name="proxy-config-test",
+        env_file=str(env_file),
+        files=(
+            "compose.yaml",
+            "overrides/compose.mariadb.yaml",
+            "overrides/compose.redis.yaml",
+            "overrides/compose.noproxy.yaml",
+        ),
+    )
+    services = json.loads(compose.output("config", "--format", "json"))["services"]
+    assert services["frontend"]["environment"]["TRUST_UPSTREAM_FORWARDED_PROTO"] == (
+        "on" if host_caddy else "off"
+    )
+    assert services["backend"]["environment"]["FORWARDED_ALLOW_IPS"] == (
+        "*" if host_caddy else "127.0.0.1,::1"
+    )
+    assert not services["backend"].get("ports")
+    if host_caddy:
+        ports = services["frontend"]["ports"]
+        assert len(ports) == 1
+        assert ports[0]["host_ip"] == "127.0.0.1"
+        assert ports[0]["published"] == "8080"
+        assert ports[0]["target"] == 8080
 
 
 def test_https(frappe_site: str, compose: Compose):
     compose("-f", "overrides/compose.https.yaml", "up", "-d")
-    check_url_content(url="https://127.0.0.1", callback=index_cb, site_name=frappe_site)
+    address = compose.output(
+        "-f", "overrides/compose.https.yaml", "port", "proxy", "443"
+    ).strip()
+    url = f"https://{address}"
+    check_url_content(url=url, callback=index_cb, site_name=frappe_site)
+    assert_oauth_return_url(url, frappe_site, "https")
 
 
 @pytest.mark.usefixtures("erpnext_setup")
@@ -173,3 +333,65 @@ class TestPostgres:
             "--admin-password",
             "admin",
         )
+
+
+def test_arbitrary_uid_execution(compose: Compose):
+    """Verify backend and frontend containers start and run under arbitrary UID with GID 0 (OpenShift restricted-v2).
+
+    Executes the entrypoints directly to verify:
+    - Container startup with arbitrary non-root UID (1000680000) and GID 0
+    - Effective runtime umask (0002)
+    - Writability of runtime paths, the bench root, and installed app directories/files
+    - Frontend nginx configuration test under arbitrary UID
+    """
+    check_script = (
+        "import os\n"
+        "import tempfile\n"
+        "uid = os.getuid()\n"
+        "gid = os.getgid()\n"
+        "assert uid == 1000680000, f'Expected UID 1000680000, got {uid}'\n"
+        "assert gid == 0, f'Expected GID 0, got {gid}'\n"
+        "with open('/etc/passwd') as f:\n"
+        "    frappe_lines = [line for line in f if line.startswith('frappe:')]\n"
+        "assert len(frappe_lines) == 1, f'Expected exactly 1 frappe user, found {len(frappe_lines)}'\n"
+        "assert not os.access('/etc/passwd', os.W_OK), '/etc/passwd must not be writable'\n"
+        "old_umask = os.umask(0)\n"
+        "os.umask(old_umask)\n"
+        "assert old_umask == 0o002, f'Expected umask 0002, got {oct(old_umask)}'\n"
+        "bench_path = '/home/frappe/frappe-bench'\n"
+        "for directory in ('/tmp', '/home/frappe', bench_path, f'{bench_path}/sites'):\n"
+        "    with tempfile.NamedTemporaryFile(dir=directory) as f:\n"
+        "        f.write(b'ok')\n"
+        "for app in ('frappe', 'erpnext'):\n"
+        "    app_path = f'{bench_path}/apps/{app}'\n"
+        "    if not os.path.isdir(app_path):\n"
+        "        continue\n"
+        "    with tempfile.NamedTemporaryFile(dir=app_path) as f:\n"
+        "        f.write(b'ok')\n"
+        "    with open(f'{app_path}/{app}/__init__.py', 'r+b'):\n"
+        "        pass\n"
+        "print(f'VERIFIED:{uid}:{gid}')\n"
+    )
+
+    compose(
+        "run",
+        "--rm",
+        "--no-deps",
+        "--user",
+        "1000680000:0",
+        "backend",
+        "/home/frappe/frappe-bench/env/bin/python",
+        "-c",
+        check_script,
+    )
+
+    compose(
+        "run",
+        "--rm",
+        "--no-deps",
+        "--user",
+        "1000680000:0",
+        "frontend",
+        "nginx",
+        "-t",
+    )

@@ -7,12 +7,16 @@ This guide walks you through building Frappe images from the repository resource
 # Prerequisites
 
 - git
-- docker (Engine **v23.0+** with buildx) or podman
+- Docker with Buildx, or Podman (see [builder compatibility](#builder-compatibility))
 - docker compose v2 or podman compose
 
 > Install containerization software according to the official maintainer documentation. Avoid package managers when not recommended, as they frequently cause compatibility issues.
 
-> **Why Docker Engine v23+?** The build uses [BuildKit secrets](https://docs.docker.com/build/building/secrets/) (`--secret`) to keep `apps.json` tokens out of image layers. BuildKit is the default builder starting with Docker Engine 23.0 — older releases will fail or silently fall back to the legacy builder, which does not support secret mounts.
+## Builder compatibility
+
+Use Docker with BuildKit/Buildx or Podman with Buildah. The `custom` and `layered` images require support for [build secret mounts](https://docs.docker.com/build/building/secrets/) (`RUN --mount=type=secret`) to read `apps.json`.
+
+The Containerfiles select the stable Dockerfile frontend with `# syntax=docker/dockerfile:1`. Bench permissions are applied with `chmod` in the builder stage, so symbolic `COPY --chmod` support is not required.
 
 # Clone this repo
 
@@ -50,7 +54,7 @@ To include custom apps in your image, create an `apps.json` file in the reposito
 
 Choose the appropriate build command based on your container runtime and desired image type. This example builds the `layered` image with the custom `apps.json` you created.
 
-> **Security note:** The `apps.json` file is passed as a [BuildKit secret](https://docs.docker.com/build/building/secrets/) so that private repository tokens are **never** stored in image layer metadata. Do not use `--build-arg` for `apps.json` — build arguments are permanently visible via `docker image history`. This requires **Docker Engine v23.0+** (where BuildKit is the default builder).
+> **Security note:** The `apps.json` file is passed as a [BuildKit secret](https://docs.docker.com/build/building/secrets/) so that private repository tokens are **never** stored in image layer metadata. Do not use `--build-arg` for `apps.json` — build arguments are permanently visible via `docker image history`.
 
 `Docker`:
 
@@ -80,26 +84,31 @@ podman build \
 
 This repository is fully suited for automated builds, i.e. using CI/CD pipelines.
 
-See [Automated Builds and Deployment](../03-production/06-automated-builds-and-deployment.md) for more information.
+To choose and configure when a CI build fetches fresh application sources, follow [Control application-source refreshes in CI builds](../11-how-to/06-control-source-refreshes-in-ci-builds.md). For the deployment migration stage, see [Automate site migrations](../11-how-to/11-automate-site-migrations.md).
 
 ## Build args, secrets and flags
 
-| Variable             | Purpose                                                                                                                           |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **Frappe Framework** |                                                                                                                                   |
-| FRAPPE_PATH          | Repository URL for Frappe framework source code. Defaults to <https://github.com/frappe/frappe>                                   |
-| FRAPPE_BRANCH        | Branch to use for Frappe framework. Defaults to version-16                                                                        |
-| **Custom Apps**      |                                                                                                                                   |
-| CACHE_BUST           | Can be used to invalidate the cached layer. See [Build Cache](../03-production/06-automated-builds-and-deployment.md#build-cache) |
-| (secret) apps_json   | Passed via `--secret=id=apps_json,src=apps.json`. Never use `--build-arg` for this file.                                          |
-| **Dependencies**     |                                                                                                                                   |
-| PYTHON_VERSION       | Python version for the base image                                                                                                 |
-| NODE_VERSION         | Node.js version                                                                                                                   |
-| WKHTMLTOPDF_VERSION  | wkhtmltopdf version                                                                                                               |
-| INSTALL_CHROMIUM     | Configure chromium installation, defaults to `true` - needed for Frappe Workbench version >15                                     |
-| **bench only**       |                                                                                                                                   |
-| DEBIAN_BASE          | Debian base version for the bench image, defaults to `bookworm`                                                                   |
-| WKHTMLTOPDF_DISTRO   | use the specified distro for debian package. Default is `bookworm`                                                                |
+| Variable             | Purpose                                                                                                                       |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **Frappe Framework** |                                                                                                                               |
+| FRAPPE_PATH          | Repository URL for Frappe framework source code. Defaults to <https://github.com/frappe/frappe>                               |
+| FRAPPE_BRANCH        | Branch to use for Frappe framework. Defaults to version-16                                                                    |
+| **Custom Apps**      |                                                                                                                               |
+| CACHE_BUST           | Can be used to invalidate the cached layer. See [Build cache reference](../12-reference/04-build-cache.md#cache-invalidation) |
+| (secret) apps_json   | Passed via `--secret=id=apps_json,src=apps.json`. Never use `--build-arg` for this file.                                      |
+| **Dependencies**     |                                                                                                                               |
+| PYTHON_VERSION       | Python version for the base image                                                                                             |
+| NODE_VERSION         | Node.js version                                                                                                               |
+| DEBIAN_BASE          | Debian base version for base, custom, and bench images, defaults to `trixie` (`bookworm` for v15)                             |
+| INSTALL_WKHTMLTOPDF  | Include wkhtmltopdf, defaults to `true`. See the [deprecation plan](../13-explanation/09-wkhtmltopdf-deprecation.md).         |
+| WKHTMLTOPDF_VERSION  | wkhtmltopdf version                                                                                                           |
+| WKHTMLTOPDF_DISTRO   | use the specified distro for debian package. Default is `bookworm`                                                            |
+| INSTALL_CHROMIUM     | Configure chromium installation, defaults to `true` - needed for Frappe Workbench version >15                                 |
+
+The custom and production images enable pnpm through Corepack. If the selected
+Node.js version does not bundle Corepack, the image installs it separately.
+Apps can select their pnpm version with the `packageManager` field in
+`package.json`; Corepack downloads that version when the app build first uses pnpm.
 
 # Deploy the stack
 

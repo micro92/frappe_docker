@@ -1,4 +1,7 @@
 #!/bin/bash
+set -e
+
+umask 0002
 
 # Set variables that do not exist
 if [[ -z "$BACKEND" ]]; then
@@ -9,6 +12,20 @@ if [[ -z "$SOCKETIO" ]]; then
   echo "SOCKETIO defaulting to 0.0.0.0:9000"
   export SOCKETIO=0.0.0.0:9000
 fi
+if [[ -z "$NGINX_LISTEN_PORT" ]]; then
+  echo "NGINX_LISTEN_PORT defaulting to 8080"
+  export NGINX_LISTEN_PORT=8080
+fi
+if [[ -z "$TRUST_UPSTREAM_FORWARDED_PROTO" ]]; then
+  export TRUST_UPSTREAM_FORWARDED_PROTO=off
+fi
+case "$TRUST_UPSTREAM_FORWARDED_PROTO" in
+on | off) ;;
+*)
+  echo "TRUST_UPSTREAM_FORWARDED_PROTO must be on or off" >&2
+  exit 1
+  ;;
+esac
 if [[ -z "$UPSTREAM_REAL_IP_ADDRESS" ]]; then
   echo "UPSTREAM_REAL_IP_ADDRESS defaulting to 127.0.0.1"
   export UPSTREAM_REAL_IP_ADDRESS=127.0.0.1
@@ -41,6 +58,8 @@ fi
 # shellcheck disable=SC2016
 envsubst '${BACKEND}
   ${SOCKETIO}
+  ${NGINX_LISTEN_PORT}
+  ${TRUST_UPSTREAM_FORWARDED_PROTO}
   ${UPSTREAM_REAL_IP_ADDRESS}
   ${UPSTREAM_REAL_IP_HEADER}
   ${UPSTREAM_REAL_IP_RECURSIVE}

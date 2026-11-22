@@ -1,7 +1,10 @@
+# syntax=docker/dockerfile:1
+
 ARG PYTHON_VERSION=3.14
-ARG DEBIAN_BASE=bookworm
+ARG DEBIAN_BASE=trixie
 FROM python:${PYTHON_VERSION}-slim-${DEBIAN_BASE} AS base
 
+ARG INSTALL_WKHTMLTOPDF=true
 ARG WKHTMLTOPDF_VERSION=0.12.6.1-3
 ARG WKHTMLTOPDF_DISTRO=bookworm
 ARG INSTALL_CHROMIUM=true
@@ -11,9 +14,10 @@ ENV NVM_DIR=/home/frappe/.nvm
 ENV NVM_SYMLINK_CURRENT=true
 ENV PATH=${NVM_DIR}/current/bin/:${PATH}
 
-RUN useradd -ms /bin/bash frappe \
+RUN useradd -u 1000 -g 0 -d /home/frappe -ms /bin/bash frappe \
     && apt-get update \
     && apt-get install --no-install-recommends -y \
+    ca-certificates \
     curl \
     git \
     vim \
@@ -39,12 +43,21 @@ RUN useradd -ms /bin/bash frappe \
     jq \
     # For MIME type detection
     media-types \
+    && . /etc/os-release \
+    && if [ "$VERSION_CODENAME" = "trixie" ]; then \
+        apt-get install --no-install-recommends -y tzdata-legacy; \
+    fi \
     # NodeJS
     && mkdir -p ${NVM_DIR} \
     && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh | bash \
     && . ${NVM_DIR}/nvm.sh \
     && nvm install ${NODE_VERSION} \
     && nvm use ${NODE_VERSION} \
+    # Node.js 25+ no longer bundles Corepack; keep Yarn installed separately.
+    && if ! command -v corepack >/dev/null 2>&1; then \
+        npm install -g corepack@0.36.0 \
+        && corepack disable yarn; \
+    fi \
     && npm install -g yarn \
     && corepack enable pnpm \
     && nvm alias default ${NODE_VERSION} \
@@ -53,12 +66,14 @@ RUN useradd -ms /bin/bash frappe \
     && echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm' >>/home/frappe/.bashrc \
     && echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion' >>/home/frappe/.bashrc \
     # Install wkhtmltopdf with patched qt
-    && if [ "$(uname -m)" = "aarch64" ]; then export ARCH=arm64; fi \
-    && if [ "$(uname -m)" = "x86_64" ]; then export ARCH=amd64; fi \
-    && downloaded_file=wkhtmltox_${WKHTMLTOPDF_VERSION}.${WKHTMLTOPDF_DISTRO}_${ARCH}.deb \
-    && curl -sLO https://github.com/wkhtmltopdf/packaging/releases/download/$WKHTMLTOPDF_VERSION/$downloaded_file \
-    && apt-get install -y ./$downloaded_file \
-    && rm $downloaded_file \
+    && if [ "$INSTALL_WKHTMLTOPDF" != "false" ]; then \
+        if [ "$(uname -m)" = "aarch64" ]; then export ARCH=arm64; fi \
+        && if [ "$(uname -m)" = "x86_64" ]; then export ARCH=amd64; fi \
+        && downloaded_file=wkhtmltox_${WKHTMLTOPDF_VERSION}.${WKHTMLTOPDF_DISTRO}_${ARCH}.deb \
+        && curl -fsSLO https://github.com/wkhtmltopdf/packaging/releases/download/$WKHTMLTOPDF_VERSION/$downloaded_file \
+        && apt-get install --no-install-recommends -y "./$downloaded_file" \
+        && rm "$downloaded_file"; \
+    fi \
     # Chromium
     && if [ "$INSTALL_CHROMIUM" != "false" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
@@ -73,12 +88,9 @@ RUN useradd -ms /bin/bash frappe \
     && sed -i '/user www-data/d' /etc/nginx/nginx.conf \
     && ln -sf /dev/stdout /var/log/nginx/access.log && ln -sf /dev/stderr /var/log/nginx/error.log \
     && touch /run/nginx.pid \
-    && chown -R frappe:frappe /etc/nginx/conf.d \
-    && chown -R frappe:frappe /etc/nginx/nginx.conf \
-    && chown -R frappe:frappe /etc/nginx/snippets \
-    && chown -R frappe:frappe /var/log/nginx \
-    && chown -R frappe:frappe /var/lib/nginx \
-    && chown -R frappe:frappe /run/nginx.pid
+    # OpenShift and arbitrary UID compatibility (GID 0 & group writable)
+    && chgrp -R 0 /home/frappe /etc/nginx /var/log/nginx /var/lib/nginx /run \
+    && chmod -R g=u /home/frappe /etc/nginx /var/log/nginx /var/lib/nginx /run
 
 COPY resources/core/nginx/nginx-template.conf /templates/nginx/frappe.conf.template
 COPY resources/core/nginx/nginx-entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
@@ -99,7 +111,7 @@ RUN apt-get update \
     libldap2-dev \
     libmariadb-dev \
     libsasl2-dev \
-    libtiff5-dev \
+    libtiff-dev \
     libwebp-dev \
     pkg-config \
     redis-tools \
@@ -120,6 +132,7 @@ ARG FRAPPE_BRANCH=version-16
 ARG FRAPPE_PATH=https://github.com/frappe/frappe
 ARG ERPNEXT_REPO=https://github.com/frappe/erpnext
 ARG ERPNEXT_BRANCH=version-16
+# Apply group permissions after app installation and cleanup, before the runtime COPY.
 RUN bench init \
   --frappe-branch=${FRAPPE_BRANCH} \
   --frappe-path=${FRAPPE_PATH} \
@@ -131,7 +144,8 @@ RUN bench init \
   cd /home/frappe/frappe-bench && \
   bench get-app --branch=${ERPNEXT_BRANCH} --resolve-deps erpnext ${ERPNEXT_REPO} && \
   echo "{}" > sites/common_site_config.json && \
-  find apps -mindepth 1 -path "*/.git" | xargs rm -fr
+  find apps -mindepth 1 -path "*/.git" | xargs rm -fr && \
+  chmod -R g=u /home/frappe/frappe-bench
 
 FROM base AS erpnext
 
@@ -139,12 +153,13 @@ USER frappe
 
 RUN echo "echo \"Commands restricted in prodution container, Read FAQ before you proceed: https://frappe.io/ctr-faq\"" >> ~/.bashrc
 
-COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
+COPY --from=builder --chown=frappe:0 /home/frappe/frappe-bench /home/frappe/frappe-bench
 
 WORKDIR /home/frappe/frappe-bench
 
-# Move assets to image-layer storage
-RUN cp -r /home/frappe/frappe-bench/sites/assets /home/frappe/frappe-bench/assets && \
+# Keep the COPY destination group-writable and move assets to image-layer storage
+RUN chmod g=u /home/frappe/frappe-bench && \
+  cp -r /home/frappe/frappe-bench/sites/assets /home/frappe/frappe-bench/assets && \
   rm -rf /home/frappe/frappe-bench/sites/assets
 
 VOLUME [ \

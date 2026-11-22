@@ -15,7 +15,7 @@ We will setup the following:
 
 ## Requirements
 
-- A server that can run Docker Engine **v23.0+** (recommended: 2 vCPU, 4 GB RAM, 50 GB SSD). The custom-image build below uses [BuildKit secrets](https://docs.docker.com/build/building/secrets/), which require BuildKit as the default builder (Docker Engine 23.0+).
+- A server that can run Docker Engine **v23.0+** (recommended: 2 vCPU, 4 GB RAM, 50 GB SSD).
 - A public domain with DNS control.
 - Two subdomains pointing to your server IP (A/AAAA records):
   - `erp.your-domain.com`
@@ -84,7 +84,7 @@ cat > ~/gitops/apps.json <<'EOF'
 EOF
 ```
 
-Build the image, passing `apps.json` as a [BuildKit secret](https://docs.docker.com/build/building/secrets/) so that private repo tokens are never stored in image layers. This requires **Docker Engine v23.0+**, where BuildKit is the default builder:
+Use a [compatible builder](02-build-setup.md#builder-compatibility) and pass `apps.json` as a [BuildKit secret](https://docs.docker.com/build/building/secrets/) to keep private repository tokens out of image metadata:
 
 ```shell
 docker build \
@@ -104,12 +104,16 @@ cp example.env ~/gitops/erpnext.env
 sed -i 's/DB_PASSWORD=123/DB_PASSWORD=changeit/g' ~/gitops/erpnext.env
 echo 'NGINX_PROXY_HOSTS=erp.your-domain.com,crm.your-domain.com' >> ~/gitops/erpnext.env
 echo 'LETSENCRYPT_EMAIL=admin@your-domain.com' >> ~/gitops/erpnext.env
+echo 'FORWARDED_ALLOW_IPS=*' >> ~/gitops/erpnext.env
 ```
 
 Notes:
 
 - Replace `changeit` with a strong password.
 - Replace domains and email with your production values.
+- `FORWARDED_ALLOW_IPS=*` trusts the stack's internal callers for forwarded HTTPS
+  information. Keep Gunicorn's port unpublished and review any additional networks.
+  See [forwarded HTTPS setup](../11-how-to/13-configure-forwarded-https.md).
 - `NGINX_PROXY_HOSTS` is a comma-separated list without spaces.
 - If you built a custom image, add:
 
@@ -139,6 +143,11 @@ docker compose --project-name erpnext -f ~/gitops/erpnext.yaml up -d
 ```
 
 This starts MariaDB and Redis containers as part of the same stack.
+
+This recipe assumes nginx-proxy is the public edge and sets
+`TRUST_DOWNSTREAM_PROXY=false`. If another proxy precedes it, review
+[proxy trust boundaries](../13-explanation/04-tls-ssl-approaches.md#forwarded-protocol-and-trust-boundaries)
+before enabling upstream header trust.
 
 ### Create sites
 
