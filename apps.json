@@ -3,33 +3,7 @@
   {
     "url": "https://github.com/frappe/erpnext",
     "branch": "version-16"
-  },
-  {
-    "url": "https://github.com/frappe/payments",
-    "branch": "version-16"
   }
-, {
-    "url": "https://github.com/frappe/telephony",
-    "branch": "develop"
-  }
-,
-  {
-    "url": "https://github.com/frappe/helpdesk",
-    "branch": "version-16"
-  } ,
-  {
-    "url": "https://github.com/frappe/insights",
-    "branch": "develop"
-  } ,
-  {
-    "url": "https://github.com/frappe/lms",
-    "branch": "develop"
-  }
-,
-{
-"url": "https://github.com/frappe/gameplan",
-"branch": "develop"
-}
 ,{
 "url": "https://github.com/frappe/lending",
 "branch": "version-16"
