@@ -38,9 +38,5 @@
 "url": "https://github.com/frappe/lending",
 "branch": "version-16"
 }
-,
-{
-"url": "https://github.com/frappe/crm",
-"branch": "develop"
-},{"url":"https://github.com/micro-365/erpnext-HELOC","branch":"main"}
+,{"url":"https://github.com/micro-365/erpnext-HELOC","branch":"main"}
 ]
