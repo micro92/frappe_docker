@@ -28,6 +28,10 @@
   {
     "url": "https://github.com/frappe/lms",
     "branch": "version-16"
+  },
+  {
+    "url": "https://github.com/frappe/crm",
+    "branch": "version-16-hotfix"
   }
 ,
 {
